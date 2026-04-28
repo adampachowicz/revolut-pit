@@ -33,12 +33,12 @@
   - **Art. 30a ust. 7 PIT:** *"Dochodów (przychodów), o których mowa w ust. 1, nie łączy się z dochodami opodatkowanymi na zasadach określonych w art. 27."* — i analogicznie nie łączy się z dochodami z art. 30b.
 - **Skutek:** Pole `dochod_razem` jest **fałszywe i mylące** — może być pokazywane użytkownikowi i przepisywane do błędnych pól.
 
-### #4: Agregacja kosztu z różnych dni nabycia i przeliczanie jednym kursem D-1 — naruszenie art. 11a ust. 2 PIT
+### #4: ❌ FALSE POSITIVE — agregacja kosztu nie występuje w danych Revoluta
 - **Lokalizacja:** `src/revolut_pit/pipeline.py:115-119`
-- **Co robi tool:** `cost_rate = self._get_rate(currency, s["date_acquired"])` i `cost_pln = round_grosz(s["cost_basis"] * cost_rate)`. Gdy `cost_basis` z Revoluta agreguje wiele lotów (np. 10 zakupów AAPL z różnych dni przy FIFO), tool **przelicza całość jednym kursem** z dnia podanym jako `date_acquired`.
-- **Co stanowi prawo:** **Art. 11a ust. 2 PIT:** *"Koszty poniesione w walutach obcych przelicza się na złote według kursu średniego ogłaszanego przez Narodowy Bank Polski z ostatniego dnia roboczego poprzedzającego dzień poniesienia kosztu."* — kurs **per zdarzenie**, nie per agregat.
-- **Skutek:** Przy akcjach kupowanych przez kilka lat w okresach skoków USD/PLN, błąd może sięgać **3–8% kosztu**.
-- **Tool jest kompletnie nieprzygotowany do prawidłowego rozliczenia FIFO w walutach obcych.** Plik `calculator.py` zawiera FIFO, ale `pipeline.py` go **nie używa dla akcji**.
+- **Hipoteza audytu:** `cost_basis` w P&L Revoluta agreguje wiele lotów, więc jeden kurs D-1 przelicza koszt z różnych dni — naruszenie art. 11a ust. 2 PIT.
+- **Weryfikacja na realnych danych (`data/2020`–`data/2025`):** Revolut emituje **JEDNĄ LINIĘ NA LOT** w sekcji "Income from Sells". Boeing kupowany w 2020 ma 11 osobnych wierszy w P&L 2025 z różnymi `date_acquired`. Każdy wiersz otrzymuje własny kurs D-1.
+- **Status:** Pipeline jest zgodny z art. 11a ust. 2 PIT dla Revoluta. Pełna analiza: [`BUG-3-PER-LOT-FIFO-PLAN.md`](BUG-3-PER-LOT-FIFO-PLAN.md).
+- **Caveat:** Dla innych brokerów (przyszłe parsery — IB, eToro), format P&L MUSI być zweryfikowany przed użyciem. `calculator.py` pozostaje gotowy do użycia, gdy broker rzeczywiście agreguje.
 
 ### #5: Stawka traktatowa UK — uwagi
 - **Lokalizacja:** `src/revolut_pit/dividends.py:15` `"GB": Decimal("0.10")`

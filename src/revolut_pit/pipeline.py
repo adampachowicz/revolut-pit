@@ -111,24 +111,15 @@ class Pipeline:
 
         # Closed positions → PLN math.
         #
-        # KNOWN LIMITATION (see docs/review-security-28-04-26/BUG-3-PER-LOT-FIFO-PLAN.md):
-        # We rely on Revolut's pre-matched P&L row and convert the entire
-        # `cost_basis` with a single NBP D-1 rate keyed on `date_acquired`.
-        # If that row aggregates multiple buy lots (typical for DCA over many
-        # months), the conversion violates art. 11a ust. 2 PIT (per-event rate).
-        # `TaxCalculator` in calculator.py already implements per-lot D-1 — a
-        # follow-up PR will route stocks through it.
+        # Verified against real Revolut exports (2020–2025): "Income from Sells"
+        # already emits one row PER buy lot — Revolut does FIFO matching
+        # internally and proportionally splits the cost basis when one lot is
+        # sold across multiple sales. Each row therefore carries its own
+        # `date_acquired`, and applying the D-1 rate per row satisfies
+        # art. 11a ust. 2 PIT (per-event NBP rate).
         closed = []
         for s in sells:
             currency = s["currency"]
-            holding_days = (s["date_sold"] - s["date_acquired"]).days
-            if holding_days > 180:
-                self.log(
-                    f"  ⚠ {s['symbol']}: holding {holding_days} d "
-                    f"({s['date_acquired'].date()} → {s['date_sold'].date()}). "
-                    f"If acquired across multiple buy lots, verify cost basis "
-                    f"manually with per-lot NBP D-1 rates (art. 11a ust. 2 PIT)."
-                )
             cost_rate = self._get_rate(currency, s["date_acquired"])
             sell_rate = self._get_rate(currency, s["date_sold"])
 

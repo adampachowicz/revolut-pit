@@ -1,55 +1,67 @@
-# Bug #3 — Plan refaktoryzacji: per-lot FIFO + per-lot kursy NBP D-1 dla akcji
+# Bug #4 (LEGAL) / Bug #1 (MODEL-QA) — STATUS: FALSE POSITIVE
 
-**Status:** Nie zaimplementowane w branchu `fix/critical-pit38-bugs` — wymaga osobnego PR ze względu na zakres i potrzebę walidacji formatu CSV Revoluta.
+**Resolution date:** 2026-04-28 (same day as audit, after empirical verification)
+**Status:** ❌ **NIE JEST BUGIEM** dla danych z Revoluta. Hipoteza audytu była spekulatywna.
 
-## Problem
+## Co twierdziły audyty
 
-[`src/revolut_pit/pipeline.py:113-122`](../../src/revolut_pit/pipeline.py#L113-L122) bierze zagregowany wiersz "Income from Sells" z `profit_and_loss_YYYY.csv` Revoluta i przelicza **całość kosztu jednym kursem NBP D-1** dla `date_acquired`. Gdy ten wiersz reprezentuje wiele lotów kupna z różnych dni (typowy przypadek: dokupy DCA przez kilka miesięcy, sprzedaż w jednym dniu), jeden kurs zastępuje wiele kursów per nabycie — naruszenie **art. 11a ust. 2 ustawy PIT**.
+[`REVIEW-LEGAL.md` #4](REVIEW-LEGAL.md#4-agregacja-kosztu-z-różnych-dni-nabycia-i-przeliczanie-jednym-kursem-d-1--naruszenie-art-11a-ust-2-pit) i [`REVIEW-MODEL-QA.md` Bug #1](REVIEW-MODEL-QA.md#bug-1-pipeline-nie-używa-taxcalculator-dla-akcji--przelicza-koszt-jednym-kursem-d-1-dla-date_acquired-zwróconym-przez-revolut-pl) postawiły hipotezę:
 
-Konsekwencja: błąd kosztu rzędu 3-8% w okresach skoków kursu USD/PLN; podatek zaniżony lub zawyżony zależnie od kierunku dryfu.
+> Revolut P&L agreguje wiele lotów kupna do jednego wiersza z `date_acquired = data najwcześniejszego lotu`. Pipeline przelicza całość jednym kursem D-1, naruszając art. 11a ust. 2 PIT.
 
-[`src/revolut_pit/calculator.py`](../../src/revolut_pit/calculator.py) **już zawiera** poprawną implementację per-lot z `add_buy()` / `calculate_sell()` — ale `pipeline.process_stocks()` jej nie wywołuje. Dla akcji jest to **dead code**.
+Hipoteza była opatrzona zastrzeżeniem _"do potwierdzenia na realnym CSV"_.
 
-## Co jest potrzebne
+## Co pokazują realne dane
 
-1. **Pewność co do formatu Revolut P&L.** Czy "Income from Sells" daje:
-   - **(a)** jeden wiersz na każdy match FIFO lot-by-lot (każdy `date_acquired` to konkretny zakup) — wtedy obecne podejście jest OK i wystarczy walidacja, **lub**
-   - **(b)** wiersz zagregowany (jak twierdzi audyt) — wtedy trzeba zbudować FIFO samemu z `account_statement_YYYY.csv`.
+Po sprawdzeniu eksportów z [`data/2020/`](../../data/2020/) – [`data/2025/`](../../data/2025/):
 
-   **Akcja:** sprawdzić ≥ 3 realne eksporty Revoluta z różnych lat z DCA i wieloma sprzedażami. Jeśli (b) — przejść do kroku 2.
+**Revolut emituje JEDNĄ LINIĘ NA LOT.** Sekcja "Income from Sells" w `profit_and_loss_statment_YYYY.csv` zawiera per-lot match — Revolut wewnętrznie prowadzi FIFO i eksportuje każde dopasowanie sprzedaży do lotu kupna jako osobny wiersz.
 
-2. **Refaktoryzacja `pipeline.process_stocks()`:**
-   - Przed P&L: parse `account_statement_YYYY.csv` (oraz lat poprzednich, żeby zbudować FIFO carry-over) i wywołać `TaxCalculator.add_buy()` dla każdej transakcji BUY.
-   - Dla każdej SELL z `account_statement` zawołać `TaxCalculator.calculate_sell()` — to per-lot D-1 załatwia.
-   - Zachować P&L Revoluta jako **walidację cross-check** (drift > 0.5% → warning, jak już robi `audit.py`).
+### Dowód 1: Boeing 2020 → 2025 — 11 osobnych wierszy z różnymi `date_acquired`
 
-3. **Carry-over FIFO między latami.** Akcje kupione w 2020 a sprzedane w 2025 wymagają parsowania **wszystkich** poprzednich account_statementów. Tool obecnie patrzy tylko na rok `--year`. Wymaga to:
-   - Nowej opcji CLI `--data-dir-history` lub konwencji `<data_dir>/<year>/...` z auto-discovery.
-   - Cache stanu FIFO po roku (np. `~/.cache/revolut_pit/fifo_state_<broker>_<account>.json`).
+```csv
+2020-08-11,2025-05-13,BA,...,0.27,50.28,54.00,3.72,USD
+2020-10-06,2025-05-13,BA,...,0.57471264,100.00,114.94,14.94,USD
+2020-11-04,2025-05-13,BA,...,0.33670033,52.00,67.34,15.34,USD
+2020-11-06,2025-05-13,BA,...,0.30691421,47.94,61.38,13.44,USD
+2020-11-09,2025-05-13,BA,...,0.27411053,49.00,54.82,5.82,USD
+... (kolejne 6 lotów)
+```
 
-4. **Walidacja per-lot match z Revolutem.** Jeśli nasz FIFO daje inny match niż P&L Revoluta (np. broker użył inne lot ze względu na specjalne wybranie LIFO/HIFO przez użytkownika), zalogować rozbieżność i pozwolić użytkownikowi wybrać.
+Każdy wiersz dostaje swój własny kurs NBP D-1 dla swojego `date_acquired` w `pipeline._get_rate()` — **per-lot per art. 11a ust. 2 PIT**.
 
-## Szacowany rozmiar
+### Dowód 2: jeden lot sprzedany w dwóch transakcjach
 
-- **Kod:** ~250-400 LOC (process_stocks + history loader + cache + CLI)
-- **Testy:** ~10 nowych test cases (multi-lot, multi-year, drift validation)
-- **Dokumentacja:** aktualizacja HOW-IT-WORKS.md, AUDIT-TRAIL.md, ADD-BROKER.md
-- **Walidacja na realnych danych:** 1-2 dni z eksportami Revoluta różnych użytkowników
+```csv
+2021-05-14,2025-05-13,BA,...,0.94576924,214.80,189.17,-25.63,USD
+2021-05-14,2025-10-02,BA,...,0.08012015,18.20,17.39,-0.81,USD
+```
 
-## Tymczasowe ostrzeżenie dla użytkowników (do dodania w PR `fix/critical-pit38-bugs`)
+Lot kupiony 2021-05-14 podzielony na dwie sprzedaże (maj i październik 2025) — Revolut proporcjonalnie rozdziela `cost_basis` (214.80 + 18.20 = 233.00). Pipeline poprawnie stosuje **dwa kursy sell-rate** (dla 2025-05-13 i 2025-10-02) oraz **jeden kurs cost-rate** (dla 2021-05-14) — zgodnie z prawem.
 
-Aktualnie filing dla portfeli z **dokupami w różnych okresach** może być nieprecyzyjny. Rekomendacja:
-- Sprawdź ręcznie pozycje, w których `date_acquired` jest > 6 miesięcy przed `date_sold`
-- Dla tych pozycji policz koszt per-lot ze swoim własnym arkuszem (FIFO + NBP D-1 per zakup)
+### Dowód 3: dopasowanie account_statement → P&L
 
-Ostrzeżenie zostanie dodane w `pipeline.process_stocks()` jako log + w docs/SAFETY.md.
+```
+account_statement (BUY): 2025-02-11 AMD qty=4.3023768
+P&L (rows with date_acquired=2025-02-11):
+  - qty=0.98287499, cost=107.10 (sold 2025-10-01)
+  - qty=3.31950181, cost=361.73 (sold 2025-11-03)
+  Σ qty = 4.3023768 ✓
+```
 
-## Priorytet
+Jeden BUY rozsmarowany na dwa wiersze P&L o tym samym `date_acquired` — pipeline aplikuje ten sam kurs cost-rate dla obu, każdy ma własny sell-rate.
 
-**HIGH** — ale niżej niż naprawiony już Bug #1 (mieszanie C/E) i Bug #6 (false-positive swap). Dla większości użytkowników z głównie krótkoterminowymi pozycjami impact jest mały. Krytyczne dla LTR (long-term retail) z wieloletnim DCA.
+## Wniosek
 
-## Powiązane issues do zaadresowania w tym samym PR
+Pipeline `process_stocks()` w obecnej formie **jest zgodny z art. 11a ust. 2 PIT** dla danych Revoluta. Audyty były spekulatywne i opierały się na założeniu, którego rzeczywistość nie potwierdza.
 
-- Issue #10 z REVIEW-MODEL-QA: walidacja `date_acquired <= date_sold` — łatwo dodać w trakcie refaktoryzacji.
-- Issue #11: ujednolicenie klucza cache NBP między pipeline i calculator.
-- Bug #8: dywidendy w PLN obchodzą NBP — przy okazji dodać warning.
+## Co zrobiono
+
+- W commicie `9eaab36` dodano 180-day warning jako mitygację — **wycofany** w follow-up commicie po weryfikacji formatu.
+- `calculator.py` (TaxCalculator) pozostaje dostępny dla brokerów, którzy faktycznie agregują loty (np. eToro w niektórych eksportach) — przyszli kontrybutorzy parserów dla innych brokerów MUSZĄ zweryfikować format swojego brokera przed pisaniem parsera.
+
+## Co warto dodać (osobno, niski priorytet)
+
+1. Test e2e weryfikujący że dla wielo-lotowych pozycji w realnych danych, pipeline aplikuje per-lot kursy D-1.
+2. W [`docs/ADD-BROKER.md`](../ADD-BROKER.md) dopisać sekcję "Verify your broker's P&L format: per-lot or aggregated?".
+3. Wskaźnik integralności w `audit.py`: jeśli inny broker ma single-row-per-symbol z wieloma `date_acquired` zlepianymi w jeden, ostrzec.

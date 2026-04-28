@@ -4,17 +4,12 @@
 
 ## POTWIERDZONE BŁĘDY (z reproducerem)
 
-### Bug #1: Pipeline NIE używa TaxCalculator dla akcji — przelicza koszt JEDNYM kursem D-1 dla "date_acquired" zwróconym przez Revolut P&L
-- **Lokalizacja:** `src/revolut_pit/pipeline.py:113-122`, parser `src/revolut_pit/parsers/revolut/stocks.py:188-200`
-- **Hipoteza:** Każdy lot kupna powinien być przeliczony własnym kursem NBP D-1 z dnia nabycia (art. 11a ust. 1 PIT). Pipeline zamiast iść przez `TaxCalculator` (który robi per-lot) bierze gotowy zagregowany wiersz "Income from Sells" z Revolut P&L (`cost_basis`, `date_acquired`) i mnoży **jednym kursem**.
-- **Dowód (przykład liczbowy):**
-  - Buy 5 AAPL @ $100 dnia 2025-01-15 (kurs D-1 = 4.10) i Buy 5 AAPL @ $120 dnia 2025-06-15 (kurs D-1 = 3.85), Sell 10 @ $130 dnia 2025-12-01 (kurs D-1 = 4.20).
-  - Revolut P&L w wierszu sumarycznym: cost_basis = $1100, date_acquired = 2025-01-15 (data najwcześniejszego lotu).
-  - **Tool:** cost_pln = round_grosz(1100 × 4.10) = **4510.00 PLN**, gain = **950.00**, podatek = **180.50 PLN**.
-  - **Poprawnie per-lot:** cost = 5×100×4.10 + 5×120×3.85 = **4360.00 PLN**, gain = **1100.00**, podatek = **209.00 PLN**.
-  - Różnica podatku: **+28.50 PLN** zaniżonego (per-pozycja).
-- **Severity:** **CRITICAL** — łamie metodologię D-1 per-lot deklarowaną w `docs/HOW-IT-WORKS.md`.
-- **Czy zweryfikowane:** TAK. `TaxCalculator` (`calculator.py`) jest poprawny, ale jest `dead code` z punktu widzenia akcji.
+### Bug #1: ❌ FALSE POSITIVE — Revolut emituje per-lot wiersze P&L
+- **Lokalizacja:** `src/revolut_pit/pipeline.py:113-122`
+- **Pierwotna hipoteza:** Revolut P&L agreguje wiele lotów do jednego wiersza, pipeline aplikuje jeden kurs D-1 do całości.
+- **Weryfikacja na realnych danych (`data/2020`–`data/2025`):** **Pierwotna hipoteza była błędna.** Revolut "Income from Sells" emituje **per-lot match** — np. Boeing sprzedany 2025-05-13 ma 11 osobnych wierszy P&L z różnymi `date_acquired` (od 2020-08-11 do 2021-05-13). Pojedynczy lot rozsmarowany na dwie sprzedaże (np. 2021-05-14 BA → 2025-05-13 + 2025-10-02) jest dzielony proporcjonalnie. Pipeline `_get_rate(currency, s["date_acquired"])` per wiersz = **per-lot D-1**.
+- **Severity:** ✅ NOT A BUG dla Revoluta. Pełna analiza: [`BUG-3-PER-LOT-FIFO-PLAN.md`](BUG-3-PER-LOT-FIFO-PLAN.md).
+- **Caveat:** `TaxCalculator` w `calculator.py` pozostaje przydatny dla brokerów, którzy w przyszłości okażą się agregatorami (eToro, IB). Wymóg dla nowych parserów: zweryfikować format P&L przed mergem.
 
 ### Bug #2: Strata bieżącego roku jest "zerowana" i znika z wyników — brak raportu carry-forward
 - **Lokalizacja:** `src/revolut_pit/pit38.py:155` (`"dochod_pln": max(Decimal(0), dochod)`), brak nigdzie eksportu pola `loss_to_carry`/`strata_biezacego_roku`.

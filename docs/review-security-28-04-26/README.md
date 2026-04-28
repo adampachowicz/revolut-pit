@@ -10,9 +10,9 @@ Trzyrównoległy audyt repozytorium revolut-pit przed sezonem PIT-38 za rok 2025
 
 ## Top 3 do natychmiastowej naprawy
 
-1. **Bug #3 (legal+QA): Mieszanie strat C/E** — `pit38.py:77` — naruszenie art. 22 ust. 14 i art. 30b ust. 1a PIT
-2. **Bug #1 (legal+QA): Pipeline nie używa TaxCalculator dla akcji** — `pipeline.py:113-122` — naruszenie art. 11a ust. 2 PIT (per-lot D-1)
-3. **Bug #6 (QA): Detekcja swapów krypto false positive wyklucza legalne sprzedaże** — `parsers/revolut/crypto.py:121-148` + `pipeline.py:213`
+1. **Bug #3 (legal+QA): Mieszanie strat C/E** — `pit38.py:77` — naruszenie art. 22 ust. 14 i art. 30b ust. 1a PIT ✅ NAPRAWIONE
+2. ~~**Bug #1 (legal+QA): Pipeline nie używa TaxCalculator dla akcji**~~ — ❌ **FALSE POSITIVE.** Weryfikacja na realnych danych (`data/2020`–`data/2025`) wykazała, że Revolut emituje per-lot wiersze. Pipeline jest zgodny z art. 11a ust. 2 PIT. Patrz [`BUG-3-PER-LOT-FIFO-PLAN.md`](BUG-3-PER-LOT-FIFO-PLAN.md).
+3. **Bug #6 (QA): Detekcja swapów krypto false positive wyklucza legalne sprzedaże** — `parsers/revolut/crypto.py:121-148` + `pipeline.py:213` ✅ NAPRAWIONE
 
 ## Pozostałe krytyczne
 
