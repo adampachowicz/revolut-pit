@@ -3,11 +3,31 @@
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+
+
+# Characters that Excel/LibreOffice/Google Sheets interpret as the start of
+# a formula. A leading apostrophe forces the cell to be treated as text.
+# https://owasp.org/www-community/attacks/CSV_Injection
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value: Any) -> Any:
+    """Neutralise CSV/formula injection in spreadsheet cells.
+
+    User-controlled CSV fields (ticker, ISIN, country, etc.) flow into the
+    XLSX/PDF that downstream consumers (e.g. an accountant) open in Excel.
+    A value such as `=cmd|'/C calc'!A1` would execute on open. We prefix
+    such strings with an apostrophe so Excel treats them as plain text,
+    while leaving numbers/Decimals intact.
+    """
+    if isinstance(value, str) and value and value[0] in _FORMULA_TRIGGERS:
+        return "'" + value
+    return value
 
 
 class ReportGenerator:
@@ -169,7 +189,7 @@ class ReportGenerator:
         for stock in stocks:
             ws.append(
                 [
-                    stock.get("symbol", ""),
+                    _safe_cell(stock.get("symbol", "")),
                     stock.get("quantity", ""),
                     stock.get("cost_basis_pln", ""),
                     stock.get("proceeds_pln", ""),
@@ -191,7 +211,7 @@ class ReportGenerator:
         for tx in crypto:
             ws.append(
                 [
-                    tx.get("symbol", ""),
+                    _safe_cell(tx.get("symbol", "")),
                     tx.get("quantity", ""),
                     tx.get("cost_basis_pln", ""),
                     tx.get("proceeds_pln", ""),
@@ -220,8 +240,8 @@ class ReportGenerator:
         for div in dividends:
             ws.append(
                 [
-                    div.get("symbol", ""),
-                    div.get("country_code", ""),
+                    _safe_cell(div.get("symbol", "")),
+                    _safe_cell(div.get("country_code", "")),
                     div.get("gross_pln", ""),
                     div.get("wht_paid_pln", ""),
                     f"{div.get('treaty_rate', Decimal(0)) * 100:.1f}%",
@@ -241,8 +261,8 @@ class ReportGenerator:
         ws.append(headers)
 
         for key, rate in sorted(nbp_rates.items()):
-            currency, date_str = key.split("_")
-            ws.append([currency, date_str, rate])
+            currency, date_str = key.split("_", 1)
+            ws.append([_safe_cell(currency), _safe_cell(date_str), rate])
 
         for i in range(2, len(nbp_rates) + 2):
             ws[f"C{i}"].number_format = "0.0000"

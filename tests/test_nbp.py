@@ -381,3 +381,44 @@ class TestPolishPublicHolidays:
 
         assert not nbp_client._is_business_day(christmas)
         assert not nbp_client._is_business_day(christmas_2)
+
+    def test_wigilia_2025_is_holiday(self, nbp_client):
+        """Christmas Eve 24 Dec 2025+ is a statutory holiday (Dz.U. 2024 poz. 1965).
+
+        Regression for REVIEW-MODEL-QA Bug #5 — pre-fix, the code treated
+        Wigilia as a normal business day, causing audit-trail entries with
+        a date NBP never published.
+        """
+        wigilia_2025 = datetime(2025, 12, 24)
+        assert not nbp_client._is_business_day(wigilia_2025)
+
+    def test_wigilia_2024_is_still_business_day(self, nbp_client):
+        """The Wigilia holiday only takes effect from 2025 onwards."""
+        wigilia_2024 = datetime(2024, 12, 24)
+        assert nbp_client._is_business_day(wigilia_2024)
+
+
+class TestCurrencyValidation:
+    """Regression for REVIEW-SECURITY Finding 5 (SSRF/path injection)."""
+
+    @pytest.fixture
+    def nbp_client(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            yield NBPClient(cache_dir=tmp_dir)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "../../../etc/passwd",
+            "USD/../A/USD",
+            "usd",
+            "US",
+            "USDD",
+            "US1",
+            "",
+            "USD\nfoo",
+        ],
+    )
+    def test_invalid_currency_rejected(self, nbp_client, bad):
+        with pytest.raises(ValueError, match="Invalid currency"):
+            nbp_client.get_rate(bad, datetime(2025, 3, 5))

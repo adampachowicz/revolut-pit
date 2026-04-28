@@ -109,7 +109,14 @@ class Pipeline:
             if s.get("isin") and s.get("country"):
                 isin_country_map[s["isin"]] = s["country"]
 
-        # Closed positions → PLN math
+        # Closed positions → PLN math.
+        #
+        # Verified against real Revolut exports (2020–2025): "Income from Sells"
+        # already emits one row PER buy lot — Revolut does FIFO matching
+        # internally and proportionally splits the cost basis when one lot is
+        # sold across multiple sales. Each row therefore carries its own
+        # `date_acquired`, and applying the D-1 rate per row satisfies
+        # art. 11a ust. 2 PIT (per-event NBP rate).
         closed = []
         for s in sells:
             currency = s["currency"]
@@ -201,8 +208,12 @@ class Pipeline:
 
         parser = CryptoParser(year=self.year)
 
-        # Detect swaps from account statement (exclude their dates from taxable P&L)
-        swap_keys = set()
+        # Detect swaps from account statement. We exclude only the EXACT
+        # sell-leg of a detected swap (matched by symbol, date, and quantity)
+        # so that a legitimate fiat sale of the same coin on the same day
+        # is still taxed (art. 17 ust. 1 pkt 11 PIT applies only to
+        # crypto-to-crypto exchanges).
+        swap_sell_keys: set = set()
         if acct_path:
             try:
                 txs = parser.parse_account_statement(acct_path)
@@ -210,7 +221,9 @@ class Pipeline:
                 swap_count = 0
                 for tx in txs:
                     if tx.get("is_swap") and tx.get("type", "").lower().startswith("sell"):
-                        swap_keys.add((tx["symbol"], tx["date"].date()))
+                        swap_sell_keys.add(
+                            (tx["symbol"], tx["date"].date(), tx["quantity"])
+                        )
                         swap_count += 1
                 if swap_count:
                     self.log(f"  Detected {swap_count} crypto swap(s) — excluded from PIT-38")
@@ -232,13 +245,8 @@ class Pipeline:
                 proceeds = Decimal(str(row["Gross proceeds"]))
                 currency = str(row.get("Currency", "USD"))
 
-                # Heuristic swap detection: same-day sell+buy, ~equal proceeds vs cost
-                if abs(proceeds - cost) < Decimal("0.5") and (date_acq - date_sold).days < 365:
-                    # Don't auto-skip — only skip if matches account-detected swap
-                    pass
-
-                if (symbol, date_sold.date()) in swap_keys:
-                    self.log(f"  Skipping {symbol} {date_sold.date()} — token swap (non-taxable)")
+                if (symbol, date_sold.date(), qty) in swap_sell_keys:
+                    self.log(f"  Skipping {symbol} {date_sold.date()} qty={qty} — token swap (non-taxable)")
                     continue
 
                 cost_rate = self._get_rate(currency, date_acq)
@@ -272,8 +280,16 @@ class Pipeline:
 
     # -- Top-level ------------------------------------------------------------
 
-    def run(self, prior_year_loss: Decimal = Decimal(0)) -> Dict:
-        """Run end-to-end and return full result dict."""
+    def run(
+        self,
+        prior_year_loss_c: Decimal = Decimal(0),
+        prior_year_loss_e: Decimal = Decimal(0),
+    ) -> Dict:
+        """Run end-to-end and return full result dict.
+
+        Prior-year losses are tracked separately per source (art. 9 ust. 6 PIT):
+        crypto losses cannot offset securities gains and vice versa.
+        """
         self.log(f"\n{'='*60}\nrevolut-pit pipeline — year {self.year}\n{'='*60}")
 
         stocks, dividends = self.process_stocks()
@@ -287,7 +303,8 @@ class Pipeline:
             stocks=stocks,
             crypto=crypto,
             dividends=dividends,
-            prior_year_loss=prior_year_loss,
+            prior_year_loss_c=prior_year_loss_c,
+            prior_year_loss_e=prior_year_loss_e,
         )
 
         # Add detail for reports

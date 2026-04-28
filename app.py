@@ -18,6 +18,9 @@ Features:
 import os
 import io
 import json
+import re
+import shutil
+import tempfile
 from decimal import Decimal
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,6 +28,46 @@ from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
+
+
+# Permit only basic CSV-like filenames; prevent path traversal and shell-meta
+# characters from the user-supplied upload name. Streamlit does some sanitising
+# but we do not rely on it as a security boundary.
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _safe_filename(name: str) -> str:
+    """Return a sanitised, traversal-free filename, or raise ValueError."""
+    base = Path(name).name  # strips any path components
+    if not _SAFE_FILENAME_RE.match(base):
+        raise ValueError(
+            f"Unsafe filename rejected: {name!r}. "
+            "Allowed: letters, digits, '.', '_', '-' (max 128 chars)."
+        )
+    return base
+
+
+def _session_tempdir() -> Path:
+    """Return a per-session temp directory with mode 0700.
+
+    Created lazily via tempfile.mkdtemp() so the path is unpredictable and
+    cannot be hijacked by a co-tenant on the host. The path is stashed in
+    Streamlit session_state for reuse across reruns and cleaned up on reset.
+    """
+    existing = st.session_state.get("_tempdir")
+    if existing and Path(existing).is_dir():
+        return Path(existing)
+    new_dir = Path(tempfile.mkdtemp(prefix="revolut_pit_"))
+    new_dir.chmod(0o700)
+    st.session_state["_tempdir"] = str(new_dir)
+    return new_dir
+
+
+def _cleanup_session_tempdir() -> None:
+    """Remove the session temp directory and its contents."""
+    path = st.session_state.pop("_tempdir", None)
+    if path:
+        shutil.rmtree(path, ignore_errors=True)
 
 from revolut_pit import __version__
 from revolut_pit.nbp import NBPClient
@@ -164,6 +207,7 @@ with st.sidebar:
 
     # Reset button
     if st.button("🔄 Resetuj wizard", use_container_width=True):
+        _cleanup_session_tempdir()
         for key in list(st.session_state.keys()):
             if key not in ["language", "tax_year"]:
                 del st.session_state[key]
@@ -219,9 +263,15 @@ if st.session_state.step == 0:
         file_info = []
         parsed_data = []
 
+        tempdir = _session_tempdir()
+        rejected_files = []
         for uploaded_file in uploaded_files:
-            # Save to temp location for auto-detection
-            temp_path = Path(f"/tmp/{uploaded_file.name}")
+            try:
+                safe_name = _safe_filename(uploaded_file.name)
+            except ValueError as exc:
+                rejected_files.append(str(exc))
+                continue
+            temp_path = tempdir / safe_name
             temp_path.write_bytes(uploaded_file.getvalue())
 
             # Try to auto-detect
@@ -233,7 +283,7 @@ if st.session_state.step == 0:
 
             file_info.append(
                 {
-                    "name": uploaded_file.name,
+                    "name": safe_name,
                     "size_kb": f"{uploaded_file.size / 1024:.1f}",
                     "detected": detection_status,
                 }
@@ -241,11 +291,14 @@ if st.session_state.step == 0:
 
             parsed_data.append(
                 {
-                    "name": uploaded_file.name,
+                    "name": safe_name,
                     "path": temp_path,
                     "parser": detected_parser,
                 }
             )
+
+        for msg in rejected_files:
+            st.warning(msg)
 
         file_df = pd.DataFrame(file_info)
         st.dataframe(file_df, use_container_width=True)
@@ -287,15 +340,9 @@ elif st.session_state.step == 1:
     if st.session_state.parsed_data:
         with st.spinner(i18n("fetching_nbp", lang)):
             try:
-                # Create temporary directory for files
-                temp_dir = Path(f"/tmp/revolut_pit_{datetime.now().timestamp()}")
-                temp_dir.mkdir(exist_ok=True)
-
-                # Copy files to temp dir
-                for file_data in st.session_state.parsed_data:
-                    import shutil
-
-                    shutil.copy(file_data["path"], temp_dir / file_data["name"])
+                # Reuse the per-session temp directory created during upload;
+                # it already holds the sanitised CSV files, no copy needed.
+                temp_dir = _session_tempdir()
 
                 # Initialize pipeline and fetch rates
                 nbp_client = NBPClient()
@@ -517,15 +564,8 @@ elif st.session_state.step == 6:
     # Run full pipeline to generate PIT-38
     with st.spinner(i18n("calculating", lang)):
         try:
-            # Create temporary directory for files
-            temp_dir = Path(f"/tmp/revolut_pit_{datetime.now().timestamp()}")
-            temp_dir.mkdir(exist_ok=True)
-
-            # Copy files to temp dir
-            for file_data in st.session_state.parsed_data:
-                import shutil
-
-                shutil.copy(file_data["path"], temp_dir / file_data["name"])
+            # Reuse the per-session temp directory.
+            temp_dir = _session_tempdir()
 
             # Initialize pipeline
             nbp_client = NBPClient()
@@ -536,8 +576,14 @@ elif st.session_state.step == 6:
                 verbose=False,
             )
 
-            # Run pipeline
-            result = pipeline.run(prior_year_loss=st.session_state.prior_loss)
+            # Run pipeline. Per art. 9 ust. 6 PIT, prior-year losses must be
+            # tracked per source — the UI currently captures only one value;
+            # we apply it to Part C (securities). Crypto carry-forward is left
+            # at zero until a dedicated input is added.
+            result = pipeline.run(
+                prior_year_loss_c=st.session_state.prior_loss,
+                prior_year_loss_e=Decimal(0),
+            )
             st.session_state.pipeline_result = result
 
         except Exception as e:
@@ -612,7 +658,7 @@ elif st.session_state.step == 6:
         with col1:
             # Generate Excel
             try:
-                report_gen = ReportGenerator(Path("/tmp"))
+                report_gen = ReportGenerator(_session_tempdir())
                 detail = result.get("_detail", {})
                 stocks = detail.get("stocks", [])
                 crypto = detail.get("crypto", [])
@@ -696,9 +742,7 @@ elif st.session_state.step == 6:
                         raise
                     raise
 
-                import tempfile
-
-                pdf_tmp = Path(tempfile.gettempdir()) / f"pit38_{st.session_state.tax_year}_audyt.pdf"
+                pdf_tmp = _session_tempdir() / f"pit38_{st.session_state.tax_year}_audyt.pdf"
                 generate_audit_pdf(
                     pit38_result=result,
                     output_path=pdf_tmp,
@@ -740,6 +784,7 @@ elif st.session_state.step == 6:
             st.rerun()
     with col2:
         if st.button("🔄 Resetuj", use_container_width=True):
+            _cleanup_session_tempdir()
             for key in list(st.session_state.keys()):
                 if key not in ["language", "tax_year"]:
                     del st.session_state[key]

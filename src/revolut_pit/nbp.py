@@ -7,6 +7,7 @@ Caches results to ~/.cache/revolut_pit/nbp_rates.json
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -16,9 +17,10 @@ from typing import Optional, Dict, Set, Tuple
 import requests
 
 
-# Polish public holidays for 2020-2026
-# Fixed holidays: (month, day)
-# Moveable holidays (Easter-based): calculated per year
+# Polish public holidays — NBP does not publish FX tables on these days.
+# Christmas Eve (24 December) was made a public holiday from 2025 onwards by
+# the Act of 6 December 2024 (Dz.U. 2024 poz. 1965); we apply that rule
+# conditionally per year below.
 POLISH_FIXED_HOLIDAYS = {
     (1, 1),      # New Year
     (1, 6),      # Three Kings Day
@@ -30,6 +32,13 @@ POLISH_FIXED_HOLIDAYS = {
     (12, 25),    # Christmas Day
     (12, 26),    # Second Day of Christmas
 }
+
+# 24 December (Wigilia) is a statutory non-working day in Poland from 2025
+# onwards (Dz.U. 2024 poz. 1965). NBP does not publish exchange rates.
+WIGILIA_HOLIDAY_FROM_YEAR = 2025
+
+# ISO 4217 currency code: exactly three uppercase Latin letters.
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 # Moveable holidays (Easter-based) for 2020-2026
 # Format: (year, month, day) for Good Friday, Easter Monday, Corpus Christi
@@ -51,6 +60,9 @@ def _get_all_holidays(year: int) -> Set[Tuple[int, int]]:
     # Add moveable holidays for this year
     if year in MOVEABLE_HOLIDAYS_BY_YEAR:
         holidays.update(MOVEABLE_HOLIDAYS_BY_YEAR[year])
+
+    if year >= WIGILIA_HOLIDAY_FROM_YEAR:
+        holidays.add((12, 24))
 
     return holidays
 
@@ -122,8 +134,15 @@ class NBPClient:
             Exchange rate as Decimal
 
         Raises:
-            ValueError: If rate cannot be found after max retries
+            ValueError: If currency is not a valid ISO 4217 code, or rate cannot
+                be found after max retries.
         """
+        if not isinstance(currency, str) or not _CURRENCY_RE.match(currency):
+            raise ValueError(
+                f"Invalid currency code: {currency!r}. "
+                "Expected ISO 4217 (three uppercase letters, e.g. 'USD')."
+            )
+
         if use_d_minus_1:
             # Find last business day before transaction
             query_date = date - timedelta(days=1)

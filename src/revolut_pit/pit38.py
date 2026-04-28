@@ -1,10 +1,25 @@
-"""PIT-38 form generator."""
+"""PIT-38 form generator.
+
+Polish capital gains tax law treats securities (Part C) and crypto (Part E)
+as SEPARATE sources of income. Per art. 22 ust. 14 and art. 30b ust. 1a PIT,
+losses cannot cross between them — a crypto loss does NOT offset a stock gain.
+
+Key legal references:
+- Art. 9 ust. 3 PIT — loss carry-forward 5 years; cap 5M PLN/year (sentence 2)
+- Art. 9 ust. 6 PIT — losses applied within the same source only
+- Art. 30b ust. 1 PIT — securities, 19% flat
+- Art. 30b ust. 1a PIT — crypto, 19% flat (separate source)
+- Art. 30a ust. 1 pkt 4 + ust. 7 PIT — dividends, 19% withholding, NOT combined
+  with art. 30b income; foreign WHT credit per art. 30a ust. 9 i 11.
+"""
 
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-# Polish law (art. 7e ust. 3 PIT): max 5,000,000 PLN deducted in a single year
+# Art. 9 ust. 3 zd. 2 PIT: max 5,000,000 PLN deductible in a single year
+# (any excess remains carried forward within the 5-year window).
 LOSS_CAP_PER_YEAR = Decimal("5000000")
+TAX_RATE = Decimal("0.19")
 
 
 class PIT38Generator:
@@ -19,112 +34,87 @@ class PIT38Generator:
         stocks: List[Dict],
         crypto: List[Dict],
         dividends: List[Dict],
-        prior_year_loss: Decimal = Decimal(0),
+        prior_year_loss_c: Decimal = Decimal(0),
+        prior_year_loss_e: Decimal = Decimal(0),
     ) -> Dict:
         """
         Generate PIT-38 form structure.
 
-        Args:
-            stocks: List of stock sale results from calculator
-            crypto: List of crypto sale results from calculator
-            dividends: List of dividend results from calculator
-            prior_year_loss: Loss carry-forward from prior years
+        Losses are tracked separately per source (art. 9 ust. 6 PIT):
+        - prior_year_loss_c: losses from securities (Part C) carried forward
+        - prior_year_loss_e: losses from crypto (Part E) carried forward
 
-        Returns:
-            {
-                'rok_podatkowy': int,
-                'czesc_C': {  # Securities
-                    'przychod_pln': Decimal,
-                    'koszt_pln': Decimal,
-                    'dochod_pln': Decimal,
-                },
-                'czesc_D': {  # Dividends
-                    'przychod_pln': Decimal,
-                    'podatek_pl_19': Decimal,
-                    'podatek_zagraniczny': Decimal,
-                    'podatek_do_zaplaty': Decimal,
-                },
-                'czesc_E': {  # Crypto
-                    'przychod_pln': Decimal,
-                    'koszt_pln': Decimal,
-                    'dochod_pln': Decimal,
-                },
-                'czesc_G': {  # Prior losses
-                    'strata_z_lat_ubieglych': Decimal,
-                    'applied_loss': Decimal,
-                    'remaining_loss_carryforward': Decimal,
-                },
-                'pit_zg': [  # Foreign income attachment
-                    {'kraj': str, 'dochod_pln': Decimal, 'podatek_zagraniczny_pln': Decimal},
-                ],
-                'dochod_razem': Decimal,
-                'podatek_do_zaplaty': Decimal,
-                'warnings': [str],
-            }
+        A crypto loss CANNOT offset a securities gain and vice versa.
+
+        Each section reports both `dochod_pln` (gain) and `strata_pln` (loss),
+        so the caller knows the current-year loss to carry forward (art. 9 ust. 3).
+
+        Returns a dict with keys: rok_podatkowy, czesc_C, czesc_D, czesc_E,
+        czesc_G, pit_zg, dochod_razem, podatek_do_zaplaty, warnings.
         """
-        warnings = []
+        warnings: List[str] = []
 
-        # Part C: Securities (stocks)
         czesc_c = self._aggregate_section(stocks)
-
-        # Part E: Crypto
         czesc_e = self._aggregate_section(crypto)
-
-        # Part D: Dividends
         czesc_d = self._aggregate_dividends(dividends)
 
-        # Aggregate income from capital gains sections (C + E)
-        capital_gains_income = czesc_c["dochod_pln"] + czesc_e["dochod_pln"]
+        # Apply prior-year losses, per-source, with the 5M PLN annual cap.
+        applied_c, remaining_c = self._apply_prior_loss(
+            prior_year_loss_c, czesc_c["dochod_pln"], "C", warnings
+        )
+        applied_e, remaining_e = self._apply_prior_loss(
+            prior_year_loss_e, czesc_e["dochod_pln"], "E", warnings
+        )
 
-        # Part G: Prior losses with 5M PLN annual cap (art. 7e ust. 3 PIT)
-        applied_loss = Decimal(0)
-        remaining_loss_carryforward = prior_year_loss
+        dochod_c_after_loss = max(Decimal(0), czesc_c["dochod_pln"] - applied_c)
+        dochod_e_after_loss = max(Decimal(0), czesc_e["dochod_pln"] - applied_e)
 
-        if prior_year_loss > 0 and capital_gains_income > 0:
-            # Cap the deduction at 5M PLN per year
-            applied_loss = min(prior_year_loss, LOSS_CAP_PER_YEAR)
-            remaining_loss_carryforward = prior_year_loss - applied_loss
-
-            # Reduce capital gains income by applied loss
-            capital_gains_income = max(Decimal(0), capital_gains_income - applied_loss)
-
-            warnings.append(
-                f"Loss carry-forward applied: {applied_loss} PLN deducted from income"
-            )
-
-            if remaining_loss_carryforward > 0:
-                warnings.append(
-                    f"⚠ Strata {remaining_loss_carryforward} PLN przekracza roczny limit "
-                    f"5 mln PLN — pozostała kwota {remaining_loss_carryforward} PLN "
-                    f"przechodzi na kolejne lata"
-                )
+        czesc_c["dochod_po_stracie_pln"] = dochod_c_after_loss
+        czesc_e["dochod_po_stracie_pln"] = dochod_e_after_loss
 
         czesc_g = {
-            "strata_z_lat_ubieglych": prior_year_loss,
-            "applied_loss": applied_loss,
-            "remaining_loss_carryforward": remaining_loss_carryforward,
+            "strata_z_lat_ubieglych_c": prior_year_loss_c,
+            "strata_z_lat_ubieglych_e": prior_year_loss_e,
+            "applied_loss_c": applied_c,
+            "applied_loss_e": applied_e,
+            "remaining_loss_carryforward_c": remaining_c,
+            "remaining_loss_carryforward_e": remaining_e,
         }
 
-        # Total taxable income (after loss application)
-        dochod_razem = capital_gains_income + czesc_d["przychod_pln"]
-
-        # Total tax to pay
-        # Capital gains tax = reduced income (after loss) × 19%
-        tax_securities_crypto = max(Decimal(0), capital_gains_income * Decimal("0.19"))
-        tax_dividends = czesc_d["podatek_do_zaplaty"]
-
-        podatek_do_zaplaty = tax_securities_crypto + tax_dividends
-
-        # Build PIT/ZG (foreign income by country)
-        pit_zg = []
-        for div in dividends:
-            pit_zg.append(
-                {
-                    "kraj": div.get("country_code", "XX"),
-                    "dochod_pln": div.get("gross_pln", Decimal(0)),
-                    "podatek_zagraniczny_pln": div.get("wht_paid_pln", Decimal(0)),
-                }
+        # Current-year losses — to be carried into NEXT year's prior_year_loss_*.
+        # Reported so the user does not lose the carry-forward right (art. 9 ust. 3).
+        if czesc_c["strata_pln"] > 0:
+            warnings.append(
+                f"Strata bieżącego roku z części C (papiery wartościowe): "
+                f"{czesc_c['strata_pln']} PLN — zachowaj do rozliczenia w latach "
+                f"{self.tax_year + 1}–{self.tax_year + 5} (art. 9 ust. 3 PIT)."
             )
+        if czesc_e["strata_pln"] > 0:
+            warnings.append(
+                f"Strata bieżącego roku z części E (kryptowaluty): "
+                f"{czesc_e['strata_pln']} PLN — zachowaj do rozliczenia w latach "
+                f"{self.tax_year + 1}–{self.tax_year + 5} (art. 22 ust. 16 PIT)."
+            )
+
+        # `dochod_razem`: total taxable capital-gains income (C + E after losses).
+        # Dividends (Part D) are NOT included — art. 30a ust. 7 PIT prohibits
+        # combining art. 30a (dividends) with art. 30b (capital gains) income.
+        dochod_razem = dochod_c_after_loss + dochod_e_after_loss
+
+        tax_c = (dochod_c_after_loss * TAX_RATE).quantize(Decimal("0.01"))
+        tax_e = (dochod_e_after_loss * TAX_RATE).quantize(Decimal("0.01"))
+        tax_d = czesc_d["podatek_do_zaplaty"]
+
+        podatek_do_zaplaty = tax_c + tax_e + tax_d
+
+        pit_zg = [
+            {
+                "kraj": div.get("country_code", "XX"),
+                "dochod_pln": div.get("gross_pln", Decimal(0)),
+                "podatek_zagraniczny_pln": div.get("wht_paid_pln", Decimal(0)),
+            }
+            for div in dividends
+        ]
 
         return {
             "rok_podatkowy": self.tax_year,
@@ -134,12 +124,51 @@ class PIT38Generator:
             "czesc_G": czesc_g,
             "pit_zg": pit_zg,
             "dochod_razem": dochod_razem,
+            "podatek_czesc_C": tax_c,
+            "podatek_czesc_E": tax_e,
+            "podatek_czesc_D": tax_d,
             "podatek_do_zaplaty": podatek_do_zaplaty,
             "warnings": warnings,
         }
 
+    def _apply_prior_loss(
+        self,
+        prior_loss: Decimal,
+        current_income: Decimal,
+        section: str,
+        warnings: List[str],
+    ) -> tuple[Decimal, Decimal]:
+        """Apply prior-year loss to current income with the 5M PLN annual cap.
+
+        Returns (applied_loss, remaining_loss_carryforward).
+        """
+        if prior_loss <= 0 or current_income <= 0:
+            return Decimal(0), prior_loss
+
+        capped = min(prior_loss, LOSS_CAP_PER_YEAR)
+        # Cannot apply more than the income itself.
+        applied = min(capped, current_income)
+        remaining = prior_loss - applied
+
+        warnings.append(
+            f"Strata z lat ubiegłych zastosowana w części {section}: "
+            f"{applied} PLN (limit roczny 5 mln PLN — art. 9 ust. 3 PIT)."
+        )
+        if prior_loss > LOSS_CAP_PER_YEAR:
+            warnings.append(
+                f"⚠ Strata {prior_loss} PLN w części {section} przekracza roczny "
+                f"limit 5 mln PLN — pozostała kwota {remaining} PLN przechodzi "
+                f"na kolejne lata."
+            )
+        return applied, remaining
+
     def _aggregate_section(self, transactions: List[Dict]) -> Dict:
-        """Aggregate capital gains section (C, E)."""
+        """Aggregate a capital-gains section (C or E).
+
+        Reports both `dochod_pln` (positive gain) and `strata_pln` (positive
+        loss magnitude). Exactly one of them is non-zero. The raw signed
+        balance is also returned as `bilans_pln` for transparency.
+        """
         przychod = Decimal(0)
         koszt = Decimal(0)
 
@@ -147,12 +176,14 @@ class PIT38Generator:
             przychod += tx.get("proceeds_pln", Decimal(0))
             koszt += tx.get("cost_basis_pln", Decimal(0))
 
-        dochod = przychod - koszt
+        bilans = przychod - koszt
 
         return {
             "przychod_pln": przychod,
             "koszt_pln": koszt,
-            "dochod_pln": max(Decimal(0), dochod),
+            "bilans_pln": bilans,
+            "dochod_pln": max(Decimal(0), bilans),
+            "strata_pln": max(Decimal(0), -bilans),
         }
 
     def _aggregate_dividends(self, dividends: List[Dict]) -> Dict:

@@ -34,14 +34,30 @@ def cli():
     help="Directory for output files",
 )
 @click.option(
-    "--prior-loss",
+    "--prior-loss-c",
     type=float,
     default=0.0,
     show_default=True,
-    help="Loss carry-forward from prior years (PLN)",
+    help="Loss carry-forward from prior years for Part C (securities, PLN). "
+    "Per art. 9 ust. 6 PIT, securities losses can only offset securities gains.",
+)
+@click.option(
+    "--prior-loss-e",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Loss carry-forward from prior years for Part E (crypto, PLN). "
+    "Per art. 22 ust. 14 PIT, crypto losses can only offset crypto gains.",
 )
 @click.option("--quiet", is_flag=True, help="Suppress progress logs")
-def calc(year: int, data_dir: str, output_dir: str, prior_loss: float, quiet: bool):
+def calc(
+    year: int,
+    data_dir: str,
+    output_dir: str,
+    prior_loss_c: float,
+    prior_loss_e: float,
+    quiet: bool,
+):
     """Calculate PIT-38 from Revolut exports."""
     click.echo(f"revolut-pit v{__version__}")
 
@@ -59,7 +75,10 @@ def calc(year: int, data_dir: str, output_dir: str, prior_loss: float, quiet: bo
         nbp_client=NBPClient(),
         verbose=not quiet,
     )
-    result = pipeline.run(prior_year_loss=Decimal(str(prior_loss)))
+    result = pipeline.run(
+        prior_year_loss_c=Decimal(str(prior_loss_c)),
+        prior_year_loss_e=Decimal(str(prior_loss_e)),
+    )
 
     detail = result.pop("_detail", {})
 
