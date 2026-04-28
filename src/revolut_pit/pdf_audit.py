@@ -44,7 +44,12 @@ def _register_polish_font() -> None:
     """Try to find a system TTF with full Polish diacritic support."""
     global _FONT_REGULAR, _FONT_BOLD
 
+    bundled_fonts = Path(__file__).resolve().parent / "assets" / "fonts"
     candidates = [
+        # Bundled fonts, used on Streamlit Cloud and other minimal hosts.
+        (bundled_fonts / "DejaVuSans.ttf",
+         bundled_fonts / "DejaVuSans-Bold.ttf",
+         "DejaVuSans-Bundled", "DejaVuSans-Bundled-Bold"),
         # DejaVu (most Linux distros)
         ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -63,11 +68,12 @@ def _register_polish_font() -> None:
     ]
     for reg_path, bold_path, reg_name, bold_name in candidates:
         try:
-            from pathlib import Path as _P
-            if _P(reg_path).exists():
-                pdfmetrics.registerFont(TTFont(reg_name, reg_path))
-                if reg_path != bold_path and _P(bold_path).exists():
-                    pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+            reg_path = Path(reg_path)
+            bold_path = Path(bold_path)
+            if reg_path.exists():
+                pdfmetrics.registerFont(TTFont(reg_name, str(reg_path)))
+                if reg_path != bold_path and bold_path.exists():
+                    pdfmetrics.registerFont(TTFont(bold_name, str(bold_path)))
                 else:
                     bold_name = reg_name
                 _FONT_REGULAR = reg_name
@@ -169,7 +175,7 @@ def _table_style(header_bg: str = "#e8eaf6") -> TableStyle:
 
 def _legal_ref_block(ref_keys: List[str], styles) -> List:
     """Build a legal references block."""
-    out = [Paragraph("📖 <b>Podstawa prawna</b>", styles["h2"])]
+    out = [Paragraph("<b>Podstawa prawna</b>", styles["h2"])]
     for key in ref_keys:
         ref = LEGAL_REFS.get(key)
         if ref is None:
@@ -309,7 +315,7 @@ def generate_audit_pdf(
         TableStyle(
             [
                 ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#fff8e1")),
-                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("FONTNAME", (0, -1), (-1, -1), _FONT_BOLD),
             ]
         )
     )
@@ -317,9 +323,9 @@ def generate_audit_pdf(
     flow.append(Spacer(1, 8))
 
     if pit38_result.get("warnings"):
-        flow.append(Paragraph("⚠️ Ostrzeżenia:", styles["h2"]))
+        flow.append(Paragraph("Ostrzeżenia:", styles["h2"]))
         for w in pit38_result["warnings"]:
-            flow.append(Paragraph(f"• {w}", styles["warning"]))
+            flow.append(Paragraph(f"- {w}", styles["warning"]))
 
     flow.append(PageBreak())
 
@@ -442,7 +448,7 @@ def generate_audit_pdf(
                 [
                     ("FONTSIZE", (0, 0), (-1, -1), 7),
                     ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#fff8e1")),
-                    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                    ("FONTNAME", (0, -1), (-1, -1), _FONT_BOLD),
                 ]
             )
         )
@@ -502,7 +508,7 @@ def generate_audit_pdf(
                 [
                     ("FONTSIZE", (0, 0), (-1, -1), 7),
                     ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#fff8e1")),
-                    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                    ("FONTNAME", (0, -1), (-1, -1), _FONT_BOLD),
                 ]
             )
         )

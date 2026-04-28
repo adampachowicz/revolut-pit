@@ -40,6 +40,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+revolut_pit = ["assets/fonts/*.ttf", "assets/fonts/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
