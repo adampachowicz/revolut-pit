@@ -96,4 +96,60 @@ RENDER,Buy,100,1,"$100.00",0,"Jan 3, 2025, 6:18:28 PM\""""
 
             # Check if SWAPs are marked
             swaps = [tx for tx in txs if tx.get("is_swap")]
-            assert len(swaps) > 0
+            assert len(swaps) >= 2  # both legs flagged
+
+    def test_swap_detected_when_intervening_row(self, parser):
+        """Bug #6 regression: swap legs are NOT always adjacent in the CSV.
+
+        Pre-fix detector compared `i` and `i+1` only, so a fee or stake
+        row between the Sell and Buy hid the swap. The new detector
+        searches all rows within a time window.
+        """
+        csv_content = """Symbol,Type,Quantity,Price,Value,Fees,Date
+RNDR,Sell,100,1,"$100.00",0,"Jan 3, 2025, 6:18:28 PM"
+USD,Stake,0,0,"$0.00",0,"Jan 3, 2025, 6:18:28 PM"
+RENDER,Buy,100,1,"$100.00",0,"Jan 3, 2025, 6:18:28 PM\""""
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            f.flush()
+
+            txs = parser.parse_account_statement(Path(f.name))
+
+            sells = [t for t in txs if t["type"].lower().startswith("sell")]
+            buys = [
+                t for t in txs
+                if t["type"].lower().startswith("buy")
+                and "revolut x" not in t["type"].lower()
+            ]
+            assert sells[0]["is_swap"] is True
+            assert buys[0]["is_swap"] is True
+
+    def test_same_symbol_pair_is_not_swap(self, parser):
+        """Bug #6 regression: Sell+Buy of the SAME symbol is never a swap."""
+        csv_content = """Symbol,Type,Quantity,Price,Value,Fees,Date
+BTC,Sell,1,50000,"$50000.00",0,"Jan 3, 2025, 6:18:28 PM"
+BTC,Buy,1,50000,"$50000.00",0,"Jan 3, 2025, 6:18:28 PM\""""
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            f.flush()
+
+            txs = parser.parse_account_statement(Path(f.name))
+
+            assert all(not t.get("is_swap") for t in txs)
+
+    def test_revolut_x_referral_buy_not_swap_partner(self, parser):
+        """`Buy - Revolut X` referral bonuses must not be paired as a swap leg."""
+        csv_content = """Symbol,Type,Quantity,Price,Value,Fees,Date
+BTC,Sell,1,50000,"$50000.00",0,"Jan 3, 2025, 6:18:28 PM"
+ETH,Buy - Revolut X,10,3000,"$50000.00",0,"Jan 3, 2025, 6:18:28 PM\""""
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            f.flush()
+
+            txs = parser.parse_account_statement(Path(f.name))
+
+            sells = [t for t in txs if t["type"].lower().startswith("sell")]
+            assert sells[0].get("is_swap") is not True

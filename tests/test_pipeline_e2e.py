@@ -50,7 +50,10 @@ def test_pipeline_runs_end_to_end_on_fixtures(tmp_path):
         nbp_client=MockNBP(),
         verbose=False,
     )
-    result = pipeline.run(prior_year_loss=Decimal("0"))
+    result = pipeline.run(
+        prior_year_loss_c=Decimal("0"),
+        prior_year_loss_e=Decimal("0"),
+    )
 
     # Structure assertions
     assert "czesc_C" in result
