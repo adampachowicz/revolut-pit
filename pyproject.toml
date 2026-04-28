@@ -35,8 +35,10 @@ Homepage = "https://github.com/TODO/revolut-pit"
 Issues = "https://github.com/TODO/revolut-pit/issues"
 
 [tool.setuptools]
-packages = ["revolut_pit"]
 package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
